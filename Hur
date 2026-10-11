@@ -1,0 +1,719 @@
+-- =========================================================
+-- 0. ОЖИДАНИЕ ЗАГРУЗКИ И БЕЗОПАСНАЯ ИНИЦИАЛИЗАЦИЯ
+-- =========================================================
+if not game:IsLoaded() then
+    game.Loaded:Wait()
+end
+
+local Players = game:GetService("Players")
+local LocalPlayer = Players.LocalPlayer
+local CoreGui = game:GetService("CoreGui")
+local RunService = game:GetService("RunService")
+local ProximityPromptService = game:GetService("ProximityPromptService")
+local Lighting = game:GetService("Lighting")
+local UserInputService = game:GetService("UserInputService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+
+-- Очистка старых подключений (Защита от утечек памяти)
+getgenv().LocustConnections = getgenv().LocustConnections or {}
+for _, conn in pairs(getgenv().LocustConnections) do
+    pcall(function() conn:Disconnect() end)
+end
+table.clear(getgenv().LocustConnections)
+
+-- =========================================================
+-- 1. ОЧИСТКА СТАРЫХ ИНТЕРФЕЙСОВ
+-- =========================================================
+pcall(function()
+    if CoreGui:FindFirstChild("Rayfield") then
+        CoreGui.Rayfield:Destroy()
+    end
+    if LocalPlayer:FindFirstChild("PlayerGui") and LocalPlayer.PlayerGui:FindFirstChild("Rayfield") then
+        LocalPlayer.PlayerGui.Rayfield:Destroy()
+    end
+end)
+
+-- =========================================================
+-- 2. ЗАГРУЗКА БИБЛИОТЕКИ RAYFIELD (С РЕЗЕРВНЫМИ ЗЕРКАЛАМИ)
+-- =========================================================
+local Rayfield
+local urls = {
+    'https://sirius.menu/rayfield',
+    'https://raw.githubusercontent.com/UI-Libraries/Rayfield/main/source.lua',
+    'https://raw.githubusercontent.com/shlexware/Rayfield/main/source'
+}
+
+for attempt = 1, 3 do
+    for _, url in ipairs(urls) do
+        local success, result = pcall(function()
+            return loadstring(game:HttpGet(url))()
+        end)
+        if success and result then
+            Rayfield = result
+            break
+        end
+    end
+    if Rayfield then break end
+    task.wait(1)
+end
+
+if not Rayfield then
+    warn("[The Locust Script] Не удалось загрузить интерфейс Rayfield.")
+    return
+end
+
+local Window = Rayfield:CreateWindow({
+   Name = "The Locust | Universal (Fixed)",
+   LoadingTitle = "Загрузка скрипта...",
+   LoadingSubtitle = "by Assistant",
+   ConfigurationSaving = { Enabled = false },
+   KeySystem = false,
+   ToggleUIKeybind = "K",
+   ShowText = "Открыть Меню"
+})
+
+-- Переменные состояний
+_G.Noclip = false
+_G.WalkSpeed = 16
+_G.JumpPower = 50
+_G.ESP_Monster = false
+_G.MonsterRadar = false
+_G.InstantInteract = false
+_G.InfPromptDistance = false
+_G.MaxBright = false
+_G.NoFog = false
+_G.InfJump = false
+_G.AutoBreakPlanks = false
+_G.BigPlatform = false
+_G.AutoSpin = false
+_G.Fly = false
+_G.FlySpeed = 50
+
+local bigPlatformPart = nil
+local fixedPlatformY = 0
+local origDistances = {}
+
+-- Восстановление характеристик при респавне
+table.insert(getgenv().LocustConnections, LocalPlayer.CharacterAdded:Connect(function(char)
+    task.wait(1)
+    pcall(function()
+        local hum = char:FindFirstChildOfClass("Humanoid")
+        if hum then
+            hum.WalkSpeed = _G.WalkSpeed
+            hum.UseJumpPower = true
+            hum.JumpPower = _G.JumpPower
+        end
+    end)
+    if _G.Fly then _G.Fly = false end
+end))
+
+-- Вкладки
+local PlayerTab = Window:CreateTab("Игрок", 4483362458)
+local MainTab = Window:CreateTab("Карта и Итемы", 4483362458)
+local VisualsTab = Window:CreateTab("Визуалы", 4483362458)
+local SpinTab = Window:CreateTab("Колесо / Spin", 4483362458)
+local LangTab = Window:CreateTab("Язык / Language", 4483362458)
+
+---------------------------------------------------------
+-- ВКЛАДКА: ИГРОК
+---------------------------------------------------------
+PlayerTab:CreateSlider({
+   Name = "Скорость бега (WalkSpeed)",
+   Range = {16, 200},
+   Increment = 1,
+   Suffix = "Speed",
+   CurrentValue = 16,
+   Callback = function(Value) _G.WalkSpeed = Value end,
+})
+
+table.insert(getgenv().LocustConnections, RunService.RenderStepped:Connect(function()
+   pcall(function()
+      if LocalPlayer.Character then
+         local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+         if hum then hum.WalkSpeed = _G.WalkSpeed end
+      end
+   end)
+end))
+
+PlayerTab:CreateSlider({
+   Name = "Высота прыжка (JumpPower)",
+   Range = {50, 300},
+   Increment = 5,
+   Suffix = "Power",
+   CurrentValue = 50,
+   Callback = function(Value)
+      _G.JumpPower = Value
+      pcall(function()
+         if LocalPlayer.Character then
+            local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+            if hum then
+               hum.UseJumpPower = true
+               hum.JumpPower = Value
+            end
+         end
+      end)
+   end,
+})
+
+PlayerTab:CreateSlider({
+   Name = "Гравитация (Gravity)",
+   Range = {0, 196},
+   Increment = 5,
+   Suffix = "G",
+   CurrentValue = 196,
+   Callback = function(Value) workspace.Gravity = Value end,
+})
+
+-- Полет (Fly)
+local bodyGyro, bodyVelocity
+PlayerTab:CreateToggle({
+   Name = "Полет (Fly)",
+   CurrentValue = false,
+   Callback = function(Value)
+      _G.Fly = Value
+      pcall(function()
+         local char = LocalPlayer.Character
+         if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+         local hrp = char.HumanoidRootPart
+         local hum = char:FindFirstChildOfClass("Humanoid")
+
+         if Value then
+            bodyGyro = Instance.new("BodyGyro")
+            bodyGyro.P = 9e4
+            bodyGyro.maxTorque = Vector3.new(9e9, 9e9, 9e9)
+            bodyGyro.cframe = hrp.CFrame
+            bodyGyro.Parent = hrp
+
+            bodyVelocity = Instance.new("BodyVelocity")
+            bodyVelocity.velocity = Vector3.new(0, 0, 0)
+            bodyVelocity.maxForce = Vector3.new(9e9, 9e9, 9e9)
+            bodyVelocity.Parent = hrp
+
+            if hum then hum.PlatformStand = true end
+
+            task.spawn(function()
+               while _G.Fly and char and char.Parent and bodyVelocity and bodyGyro do
+                  local cam = workspace.CurrentCamera
+                  local moveDir = hum and hum.MoveDirection or Vector3.new()
+                  bodyGyro.cframe = cam.CFrame
+                  
+                  if moveDir.Magnitude > 0 then
+                     local localMove = cam.CFrame:VectorToObjectSpace(moveDir)
+                     local flyVector = (cam.CFrame.LookVector * -localMove.Z) + (cam.CFrame.RightVector * localMove.X)
+                     bodyVelocity.velocity = flyVector * _G.FlySpeed
+                  else
+                     bodyVelocity.velocity = Vector3.new(0, 0, 0)
+                  end
+                  task.wait()
+               end
+               if bodyGyro then bodyGyro:Destroy() end
+               if bodyVelocity then bodyVelocity:Destroy() end
+               if hum then hum.PlatformStand = false end
+            end)
+         else
+            if bodyGyro then bodyGyro:Destroy() end
+            if bodyVelocity then bodyVelocity:Destroy() end
+            if hum then hum.PlatformStand = false end
+         end
+      end)
+   end,
+})
+
+PlayerTab:CreateSlider({
+   Name = "Скорость полета",
+   Range = {20, 200},
+   Increment = 5,
+   Suffix = "FlySpeed",
+   CurrentValue = 50,
+   Callback = function(Value) _G.FlySpeed = Value end,
+})
+
+PlayerTab:CreateButton({
+   Name = "🚨 Экстренный ТП наверх (Спастись)",
+   Callback = function()
+      pcall(function()
+         local char = LocalPlayer.Character
+         if char and char:FindFirstChild("HumanoidRootPart") then
+            char.HumanoidRootPart.CFrame = char.HumanoidRootPart.CFrame + Vector3.new(0, 50, 0)
+            Rayfield:Notify({Title = "Спасение", Content = "Телепорт на 50м вверх!", Duration = 2})
+         end
+      end)
+   end,
+})
+
+PlayerTab:CreateToggle({
+   Name = "Платформа под ногами",
+   CurrentValue = false,
+   Callback = function(Value)
+      _G.BigPlatform = Value
+      if Value then
+         pcall(function()
+            if LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+               fixedPlatformY = LocalPlayer.Character.HumanoidRootPart.Position.Y - 3.5
+               if not bigPlatformPart or not bigPlatformPart.Parent then
+                  bigPlatformPart = Instance.new("Part")
+                  bigPlatformPart.Name = "BigPlatform"
+                  bigPlatformPart.Size = Vector3.new(500, 2, 500)
+                  bigPlatformPart.Anchored = true
+                  bigPlatformPart.CanCollide = true
+                  bigPlatformPart.Material = Enum.Material.SmoothPlastic
+                  bigPlatformPart.Color = Color3.fromRGB(0, 170, 255)
+                  bigPlatformPart.Transparency = 0.4
+                  bigPlatformPart.Parent = workspace
+               end
+            end
+         end)
+      else
+         if bigPlatformPart then
+            bigPlatformPart:Destroy()
+            bigPlatformPart = nil
+         end
+      end
+   end,
+})
+
+table.insert(getgenv().LocustConnections, RunService.RenderStepped:Connect(function()
+   pcall(function()
+      if _G.BigPlatform and bigPlatformPart and LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") then
+         bigPlatformPart.CFrame = CFrame.new(LocalPlayer.Character.HumanoidRootPart.Position.X, fixedPlatformY, LocalPlayer.Character.HumanoidRootPart.Position.Z)
+      end
+   end)
+end))
+
+PlayerTab:CreateToggle({
+   Name = "Бесконечные прыжки",
+   CurrentValue = false,
+   Callback = function(Value) _G.InfJump = Value end,
+})
+
+table.insert(getgenv().LocustConnections, UserInputService.JumpRequest:Connect(function()
+   pcall(function()
+      if _G.InfJump and LocalPlayer.Character then
+         local hum = LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+         if hum then hum:ChangeState("Jumping") end
+      end
+   end)
+end))
+
+PlayerTab:CreateToggle({
+   Name = "Noclip (Проход сквозь стены)",
+   CurrentValue = false,
+   Callback = function(Value) _G.Noclip = Value end,
+})
+
+table.insert(getgenv().LocustConnections, RunService.Stepped:Connect(function()
+   pcall(function()
+      if _G.Noclip and LocalPlayer.Character then
+         for _, part in pairs(LocalPlayer.Character:GetDescendants()) do
+            if part:IsA("BasePart") then part.CanCollide = false end
+         end
+      end
+   end)
+end))
+
+---------------------------------------------------------
+-- ВКЛАДКА: КАРТА И ИТЕМЫ
+---------------------------------------------------------
+MainTab:CreateButton({
+   Name = "Авто-обход мусорок (Зачистка до молотка)",
+   Callback = function()
+      task.spawn(function()
+         pcall(function()
+            local function hasHammer()
+               local bp = LocalPlayer:FindFirstChild("Backpack")
+               local char = LocalPlayer.Character
+               if bp then
+                  for _, item in pairs(bp:GetChildren()) do
+                     if item.Name:lower():find("hammer") or item.Name:lower():find("молоток") then return true end
+                  end
+               end
+               if char then
+                  for _, item in pairs(char:GetChildren()) do
+                     if item:IsA("Tool") and (item.Name:lower():find("hammer") or item.Name:lower():find("молоток")) then return true end
+                  end
+               end
+               return false
+            end
+
+            if hasHammer() then
+               Rayfield:Notify({Title = "Инфо", Content = "У вас уже есть молоток!", Duration = 3})
+               return
+            end
+
+            local dumpsters = {}
+            for _, v in pairs(workspace:GetDescendants()) do
+               if v.Name:find("TrashDumpster") or v.Name:find("Dumpster") then
+                  local model = v:IsA("Model") and v or (v:IsA("BasePart") and v.Parent)
+                  if model and not table.find(dumpsters, model) then
+                     table.insert(dumpsters, model)
+                  end
+               end
+            end
+
+            if #dumpsters == 0 then
+               Rayfield:Notify({Title = "Ошибка", Content = "Мусорные баки не найдены!", Duration = 3})
+               return
+            end
+
+            for _, dumpster in ipairs(dumpsters) do
+               if hasHammer() then break end
+
+               if dumpster and dumpster.Parent then
+                  local char = LocalPlayer.Character
+                  local hrp = char and char:FindFirstChild("HumanoidRootPart")
+                  
+                  if hrp then
+                     local pos = dumpster:IsA("BasePart") and dumpster.CFrame or dumpster:GetPivot()
+                     hrp.CFrame = pos + Vector3.new(0, 4, 0)
+                     task.wait(0.2)
+                  end
+
+                  local prompt = dumpster:FindFirstChildOfClass("ProximityPrompt", true)
+                  if prompt then
+                     fireproximityprompt(prompt)
+                     task.wait(0.5)
+                  end
+
+                  if hasHammer() then
+                     Rayfield:Notify({Title = "Успех!", Content = "Молоток найден!", Duration = 4})
+                     break
+                  else
+                     pcall(function() dumpster:Destroy() end)
+                  end
+               end
+               task.wait(0.2)
+            end
+         end)
+      end)
+   end,
+})
+
+MainTab:CreateToggle({
+   Name = "Бесконечный радиус взаимодействия ('E')",
+   CurrentValue = false,
+   Callback = function(Value)
+      _G.InfPromptDistance = Value
+      if not Value then
+         pcall(function()
+            for prompt, origDist in pairs(origDistances) do
+               if prompt and prompt.Parent then
+                  prompt.MaxActivationDistance = origDist
+               end
+            end
+            table.clear(origDistances)
+         end)
+      end
+   end,
+})
+
+task.spawn(function()
+   while task.wait(1) do
+      if _G.InfPromptDistance then
+         pcall(function()
+            for _, prompt in pairs(workspace:GetDescendants()) do
+               if prompt:IsA("ProximityPrompt") then
+                  if not origDistances[prompt] then
+                     origDistances[prompt] = prompt.MaxActivationDistance
+                  end
+                  prompt.MaxActivationDistance = 99999
+                  prompt.RequiresLineOfSight = false
+               end
+            end
+         end)
+      end
+   end
+end)
+
+MainTab:CreateToggle({
+   Name = "Мгновенное подбирание / Быстрое 'E'",
+   CurrentValue = false,
+   Callback = function(Value) _G.InstantInteract = Value end,
+})
+
+table.insert(getgenv().LocustConnections, ProximityPromptService.PromptButtonHoldBegan:Connect(function(prompt)
+   pcall(function()
+      if _G.InstantInteract and prompt.Enabled then fireproximityprompt(prompt) end
+   end)
+end))
+
+MainTab:CreateButton({
+   Name = "Телепорт к НАЧАЛУ побега",
+   Callback = function()
+      pcall(function()
+         local char = LocalPlayer.Character
+         if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+         local target = nil
+         for _, v in pairs(workspace:GetDescendants()) do
+            if v.Name == "StartChaseTrigger" then target = v break end
+         end
+         if target then
+            char.HumanoidRootPart.CFrame = target:IsA("BasePart") and (target.CFrame + Vector3.new(0, 3, 0)) or (target:GetPivot() + Vector3.new(0, 3, 0))
+         end
+      end)
+   end,
+})
+
+MainTab:CreateButton({
+   Name = "Телепорт к КОНЦУ побега",
+   Callback = function()
+      pcall(function()
+         local char = LocalPlayer.Character
+         if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+         local target = nil
+         for _, v in pairs(workspace:GetDescendants()) do
+            if v.Name == "EndingTrigger" then target = v break end
+         end
+         if target then
+            char.HumanoidRootPart.CFrame = target:IsA("BasePart") and (target.CFrame + Vector3.new(0, 3, 0)) or (target:GetPivot() + Vector3.new(0, 3, 0))
+         end
+      end)
+   end,
+})
+
+MainTab:CreateButton({
+   Name = "Выдать молоток в руку",
+   Callback = function()
+      pcall(function()
+         local backpack = LocalPlayer:FindFirstChild("Backpack")
+         if not backpack then return end
+         local hammerFound = nil
+         
+         for _, item in pairs(game:GetDescendants()) do
+            if item:IsA("Tool") and (item.Name:lower():find("hammer") or item.Name:lower():find("молоток")) then
+               hammerFound = item
+               break
+            end
+         end
+         
+         if hammerFound then
+            local clonedHammer = hammerFound:Clone()
+            clonedHammer.Parent = backpack
+            Rayfield:Notify({Title = "Успех", Content = "Молоток выдан!", Duration = 3})
+         else
+            Rayfield:Notify({Title = "Ошибка", Content = "Молоток не найден!", Duration = 3})
+         end
+      end)
+   end,
+})
+
+MainTab:CreateToggle({
+   Name = "Сломать доски (BETA)",
+   CurrentValue = false,
+   Callback = function(Value) _G.AutoBreakPlanks = Value end,
+})
+
+task.spawn(function()
+   while task.wait(0.3) do
+      if _G.AutoBreakPlanks then
+         pcall(function()
+            for _, v in pairs(workspace:GetDescendants()) do
+               if v.Name:lower():find("plank") or v.Name:lower():find("доск") then
+                  local prompt = v:FindFirstChildOfClass("ProximityPrompt") or (v.Parent and v.Parent:FindFirstChildOfClass("ProximityPrompt"))
+                  if prompt and prompt.Enabled then fireproximityprompt(prompt) end
+               end
+            end
+         end)
+      end
+   end
+end)
+
+---------------------------------------------------------
+-- ВКЛАДКА: ВИЗУАЛЫ
+---------------------------------------------------------
+VisualsTab:CreateToggle({
+   Name = "Радар / Предупреждение о Монстре",
+   CurrentValue = false,
+   Callback = function(Value) _G.MonsterRadar = Value end,
+})
+
+local lastAlarm = 0
+task.spawn(function()
+   while task.wait(0.5) do
+      if _G.MonsterRadar then
+         pcall(function()
+            local char = LocalPlayer.Character
+            local hrp = char and char:FindFirstChild("HumanoidRootPart")
+            if not hrp then return end
+
+            for _, v in pairs(workspace:GetDescendants()) do
+               local name = v.Name:lower()
+               if name:find("thelocust") or name:find("killtrigger") then
+                  local pos = v:IsA("BasePart") and v.Position or (v:IsA("Model") and v:GetPivot().Position)
+                  if pos then
+                     local dist = (hrp.Position - pos).Magnitude
+                     if dist <= 45 and (tick() - lastAlarm > 3) then
+                        lastAlarm = tick()
+                        Rayfield:Notify({
+                           Title = "⚠️ ОПАСНОСТЬ!",
+                           Content = "Монстр рядом! Расстояние: " .. math.floor(dist) .. "м.",
+                           Duration = 2.5
+                        })
+                     end
+                  end
+               end
+            end
+         end)
+      end
+   end
+end)
+
+VisualsTab:CreateToggle({
+   Name = "Удалить туман и размытие (No Fog)",
+   CurrentValue = false,
+   Callback = function(Value)
+      _G.NoFog = Value
+      pcall(function()
+         if Value then
+            Lighting.FogEnd = 999999
+            for _, v in pairs(Lighting:GetChildren()) do
+               if v:IsA("Atmosphere") or v:IsA("BlurEffect") or v:IsA("ColorCorrectionEffect") then
+                  v.Enabled = false
+               end
+            end
+         else
+            Lighting.FogEnd = 1000
+            for _, v in pairs(Lighting:GetChildren()) do
+               if v:IsA("Atmosphere") or v:IsA("BlurEffect") or v:IsA("ColorCorrectionEffect") then
+                  v.Enabled = true
+               end
+            end
+         end
+      end)
+   end,
+})
+
+VisualsTab:CreateToggle({
+   Name = "Максимальное освещение (Max Brightness)",
+   CurrentValue = false,
+   Callback = function(Value)
+      _G.MaxBright = Value
+      pcall(function()
+         if Value then
+            Lighting.Ambient = Color3.fromRGB(255, 255, 255)
+            Lighting.OutdoorAmbient = Color3.fromRGB(255, 255, 255)
+            Lighting.Brightness = 5
+            Lighting.GlobalShadows = false
+         else
+            Lighting.Ambient = Color3.fromRGB(127, 127, 127)
+            Lighting.Brightness = 1
+            Lighting.GlobalShadows = true
+         end
+      end)
+   end,
+})
+
+VisualsTab:CreateToggle({
+   Name = "Подсветка Монстра (TheLocust ESP)",
+   CurrentValue = false,
+   Callback = function(Value)
+      _G.ESP_Monster = Value
+      if not Value then
+         pcall(function()
+            for _, obj in pairs(workspace:GetDescendants()) do
+               if obj:FindFirstChild("MonsterESP") then obj.MonsterESP:Destroy() end
+            end
+         end)
+      end
+   end,
+})
+
+task.spawn(function()
+   while task.wait(1) do
+      if _G.ESP_Monster then
+         pcall(function()
+            for _, obj in pairs(workspace:GetDescendants()) do
+               local objName = obj.Name:lower()
+               if objName:find("thelocust") or objName:find("killtrigger") then
+                  local targetModel = obj:IsA("Model") and obj or obj.Parent
+                  if targetModel and not Players:GetPlayerFromCharacter(targetModel) then
+                     if not targetModel:FindFirstChild("MonsterESP") then
+                        local hl = Instance.new("Highlight")
+                        hl.Name = "MonsterESP"
+                        hl.FillColor = Color3.fromRGB(255, 0, 0)
+                        hl.OutlineColor = Color3.fromRGB(255, 255, 255)
+                        hl.Parent = targetModel
+                     end
+                  end
+               end
+            end
+         end)
+      end
+   end
+end)
+
+---------------------------------------------------------
+-- ВКЛАДКА: КОЛЕСО / SPIN
+---------------------------------------------------------
+local function spinWheelAction()
+   pcall(function()
+      local wheelEvent = ReplicatedStorage:FindFirstChild("WheelCooldownEvent")
+      if wheelEvent then
+         wheelEvent:FireServer("Sync")
+         wheelEvent:FireServer("BuySpin")
+      end
+      
+      local spinModel = workspace:FindFirstChild("Spin", true) or workspace:FindFirstChild("SpinWheel", true) or workspace:FindFirstChild("Wheel", true)
+      if spinModel then
+         for _, prompt in pairs(spinModel:GetDescendants()) do
+            if prompt:IsA("ProximityPrompt") then
+               fireproximityprompt(prompt)
+            end
+         end
+      end
+   end)
+end
+
+SpinTab:CreateButton({
+   Name = "Крутануть колесо прямо сейчас",
+   Callback = function()
+      spinWheelAction()
+      Rayfield:Notify({Title = "Spin", Content = "Запрос отправлен!", Duration = 3})
+   end,
+})
+
+SpinTab:CreateToggle({
+   Name = "Авто-Спин (По готовности)",
+   CurrentValue = false,
+   Callback = function(Value) _G.AutoSpin = Value end,
+})
+
+task.spawn(function()
+   while task.wait(3) do
+      if _G.AutoSpin then spinWheelAction() end
+   end
+end)
+
+SpinTab:CreateButton({
+   Name = "Телепорт к Колесу Фортуны",
+   Callback = function()
+      pcall(function()
+         local char = LocalPlayer.Character
+         if not char or not char:FindFirstChild("HumanoidRootPart") then return end
+         local spinModel = workspace:FindFirstChild("Spin", true) or workspace:FindFirstChild("SpinWheel", true) or workspace:FindFirstChild("Wheel", true)
+         if spinModel then
+            char.HumanoidRootPart.CFrame = spinModel:IsA("BasePart") and (spinModel.CFrame + Vector3.new(0, 3, 3)) or (spinModel:GetPivot() + Vector3.new(0, 3, 3))
+            Rayfield:Notify({Title = "Телепорт", Content = "Успешно!", Duration = 3})
+         end
+      end)
+   end,
+})
+
+---------------------------------------------------------
+-- ВКЛАДКА: ЯЗЫК / LANGUAGE
+---------------------------------------------------------
+LangTab:CreateDropdown({
+   Name = "Выберите язык / Select Language",
+   Options = {"Русский", "English [Временно недоступно]"},
+   CurrentOption = {"Русский"},
+   MultipleOptions = false,
+   Callback = function(Option)
+      local choice = type(Option) == "table" and Option[1] or Option
+      if choice:find("English") then
+         Rayfield:Notify({
+            Title = "Язык недоступен",
+            Content = "Английский язык временно недоступен. Используйте Русский.",
+            Duration = 4
+         })
+      end
+   end,
+})
